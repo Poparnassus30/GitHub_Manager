@@ -1,0 +1,10 @@
+# Ignorer la config locale
+config.ini
+
+# Ignorer fichiers temporaires ou caches
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
+.DS_Store
