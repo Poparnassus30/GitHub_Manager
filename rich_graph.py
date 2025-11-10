@@ -34,6 +34,13 @@ class RichGraph:
         config_lines = [
             f"user.name  : [cyan]{self.cfg.github_user}[/]",
             f"base_path : [cyan]{self.cfg.base_path}[/]",
+            "",
+            "[bold yellow]Raccourcis clavier[/]",
+            "[bold cyan]1[/] Rafraîchir   " 
+            "[bold cyan]2[/] Importer   "
+            "[bold cyan]3[/] Exporter   "
+            "[bold cyan]Q[/] Quitter",
+
         ]
         header_panel = Panel(
             "\n".join(config_lines),

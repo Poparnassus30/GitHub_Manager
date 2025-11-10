@@ -8,6 +8,8 @@ from typing import Any
 import time
 import sys
 
+from logger import info, error
+
 
 class Config:
     # Valeurs par défaut
@@ -17,10 +19,13 @@ class Config:
         "general": {
             "base_path": str(BASE_DEFAULT),
             "github_user": "Poparnassus30",
-            "refresh_rate": "4",   # secondes entre deux refresh auto
+            "refresh_rate": "70",   # secondes entre deux refresh auto
         },
         "auth": {
             "key_path": str(Path.home() / ".ssh" / "id_ed25519"),
+        },
+        "debug": {
+            "visual_log": True
         },
     }
 
@@ -48,12 +53,13 @@ class Config:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("w", encoding="utf-8") as f:
             self._parser.write(f)
+        info(f"Config par défaut écrite dans {self.path}")
 
     def _load_or_create(self) -> None:
         """Crée le fichier si besoin, puis le charge."""
         if not self.path.exists():
             self._write_default()
-            print(f"⚙️  Fichier config créé : {self.path}")
+            info(f"Config créée : {self.path}")
         self._load()
 
     def _load(self) -> None:
@@ -62,13 +68,18 @@ class Config:
             try:
                 self._parser.read(self.path, encoding="utf-8")
             except configparser.Error as e:
-                # Fichier pourri (options dupliquées, etc.)
                 backup = self.path.with_suffix(".bak")
                 try:
                     self.path.replace(backup)
-                    print(f"⚠️  Config corrompue, sauvegardée sous {backup.name}, recréation par défaut.")
-                except OSError:
-                    print("⚠️  Config corrompue, impossible de faire une sauvegarde propre, recréation par défaut.")
+                    error(
+                        f"Config corrompue ({e}), sauvegardée sous {backup.name}, "
+                        "recréation par défaut."
+                    )
+                except OSError as oe:
+                    error(
+                        f"Config corrompue ({e}) et échec de sauvegarde ({oe}), "
+                        "recréation par défaut."
+                    )
                 self._write_default()
                 self._parser.read(self.path, encoding="utf-8")
 
@@ -114,3 +125,8 @@ class Config:
     @property
     def refresh_rate(self) -> float:
         return float(self.get("general", "refresh_rate", "4"))
+
+    @property
+    def visual_log(self) -> bool:
+        raw = str(self.get("debug", "visual_log", "false")).lower()
+        return raw in ("1", "true", "yes", "on")

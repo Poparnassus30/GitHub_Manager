@@ -7,36 +7,30 @@ Point d'entrée de l'application GitHub Manager.
 
 import sys
 import traceback
-from datetime import datetime
 from pathlib import Path
 
+from config import Config
 from noyau import Noyau
+from logger import set_verbose, error
 
 BASE_DIR = Path(__file__).resolve().parent  # dossier du projet
 
+
 def main() -> int:
-    log_file = BASE_DIR / "error.log"
+    cfg = Config()
+    set_verbose(cfg.visual_log)
 
     try:
-        noyau = Noyau()
+        noyau = Noyau(cfg)
         noyau.start()
 
     except KeyboardInterrupt:
-        print("\n🛑 Arrêt demandé par l'utilisateur (Ctrl+C).")
+        # Pas de print, uniquement log fichier
+        error("KeyboardInterrupt : arrêt demandé par l'utilisateur.")
 
     except Exception as e:
-        # On logue l'exception dans un fichier + on l'affiche
-        msg = f"\n[{datetime.now().isoformat()}] EXCEPTION: {e}\n"
         tb = traceback.format_exc()
-
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(msg)
-            f.write(tb)
-            f.write("\n" + "=" * 80 + "\n")
-
-        print("❌ Une exception s'est produite. Détails dans error.log")
-        print(msg)
-        print(tb)
+        error(f"EXCEPTION dans main : {e}\n{tb}")
 
     return 0
 

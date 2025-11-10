@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Dict, List
 import time
+import threading
 
 
 @dataclass
@@ -34,11 +35,13 @@ class AppSnapshot:
 class Registre:
     """Conteneur thread-safe pour l’état global."""
 
-    def __init__(self):
-        self._lock = Lock()
+    def __init__(self,logger_func=None):
+        self._lock = threading.Lock()
         self._repos: Dict[str, RepoStatus] = {}
         self._jobs: Dict[str, SyncJob] = {}
         self._last_update = time.time()
+        self._threads: dict[str, threading.Thread] = {}
+        self._log = logger_func or (lambda msg: None)  # fallback silencieux
 
     def update_repos_bulk(self, statuses: List[RepoStatus]):
         with self._lock:
@@ -62,3 +65,32 @@ class Registre:
                 jobs=list(self._jobs.values()),
                 last_update=self._last_update,
             )
+        
+    # --------------------------------------
+    # THREAD MANAGEMENT
+    # --------------------------------------
+    def add_thread(self, name: str, thread: threading.Thread):
+        """Enregistre un thread actif."""
+        with self._lock:
+            self._threads[name] = thread
+            self._log(f"[Registre] Thread ajouté : {name}")
+
+    def remove_thread(self, name: str):
+        """Supprime un thread du registre."""
+        with self._lock:
+            if name in self._threads:
+                self._threads.pop(name)
+                self._log(f"[Registre] Thread retiré : {name}")
+
+    def list_threads(self) -> list[str]:
+        """Liste les threads actuellement enregistrés."""
+        with self._lock:
+            return list(self._threads.keys())
+
+    def cleanup_dead_threads(self):
+        """Nettoie les threads terminés (filet de sécurité)."""
+        with self._lock:
+            dead = [n for n, t in self._threads.items() if not t.is_alive()]
+            for name in dead:
+                self._threads.pop(name, None)
+                self._log(f"[Registre] Thread mort nettoyé : {name}")

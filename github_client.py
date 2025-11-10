@@ -1,6 +1,6 @@
 # github_client.py
 from __future__ import annotations
-from logger import log
+
 from pathlib import Path
 from typing import Dict, List, Tuple
 import subprocess
@@ -8,6 +8,8 @@ import json
 import urllib.request
 import urllib.error
 import re
+
+from logger import info, error, git
 
 
 def run_cmd(cwd: Path | None, *args: str) -> Tuple[int, str, str]:
@@ -46,10 +48,12 @@ class GithubClient:
         """Tous les dossiers sous base_path (qu'ils soient git ou non)."""
         result: Dict[str, Path] = {}
         if not self.base_path.exists():
+            info(f"scan_local_dirs: base_path {self.base_path} introuvable.")
             return result
         for p in self.base_path.iterdir():
-            if p.is_dir() and p.name != ".git":   # ← on ignore .git
+            if p.is_dir() and p.name != ".git":
                 result[p.name] = p
+        info(f"scan_local_dirs: {len(result)} dossiers trouvés.")
         return result
 
     def scan_local_git_repos(self) -> Dict[str, Path]:
@@ -58,6 +62,7 @@ class GithubClient:
         for name, path in self.scan_local_dirs().items():
             if (path / ".git").exists():
                 repos[name] = path
+        info(f"scan_local_git_repos: {len(repos)} dépôts git locaux.")
         return repos
 
     # ------------------------------------------------------------------
@@ -70,7 +75,7 @@ class GithubClient:
         En cas d'erreur, logue le problème et renvoie [].
         """
         url = f"https://api.github.com/users/{self.github_user}/repos?per_page=100"
-        log(f"Appel API GitHub: {url}")
+        info(f"Appel API GitHub: {url}")
 
         try:
             req = urllib.request.Request(
@@ -79,15 +84,15 @@ class GithubClient:
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 status = resp.getcode()
-                log(f"Réponse HTTP GitHub: {status}")
+                info(f"Réponse HTTP GitHub: {status}")
                 data = resp.read().decode("utf-8")
             payload = json.loads(data)
         except Exception as e:
-            log(f"❌ Erreur API GitHub pour {self.github_user} : {e}")
+            error(f"Erreur API GitHub pour {self.github_user} : {e}")
             return []
 
         if not isinstance(payload, list):
-            log(f"⚠️ Réponse GitHub inattendue pour {self.github_user}: {payload}")
+            error(f"Réponse GitHub inattendue pour {self.github_user}: {payload}")
             return []
 
         normalized: List[dict] = []
@@ -98,9 +103,8 @@ class GithubClient:
                 continue
             normalized.append({"name": name, "updated_at": updated_at})
 
-        log(f"🔎 GitHub: {len(normalized)} dépôts distants trouvés pour {self.github_user}")
+        info(f"GitHub: {len(normalized)} dépôts distants trouvés pour {self.github_user}")
         return normalized
-
 
     # ------------------------------------------------------------------
     # Git : ahead/behind + diff lignes
@@ -108,77 +112,75 @@ class GithubClient:
     def get_ahead_behind_and_lines(self, repo_path: Path) -> Tuple[int, int, int]:
         """
         Retourne (ahead_local, ahead_remote, lines_changed) pour HEAD vs branche distante.
-        - ahead_local = commits présents en local uniquement
-        - ahead_remote = commits présents sur le remote uniquement
-        - lines_changed = insertions + deletions entre les deux.
         """
-        # On récupère la branche de suivi @{u} (upstream)
         code, out, err = run_git(repo_path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
         if code != 0:
-            # Pas de remote configuré
+            git(f"[{repo_path.name}] pas de remote @{{u}} configuré (rc={code}, err={err})")
             return 0, 0, 0
 
         upstream = out.strip()  # ex: origin/main
 
-        # Met à jour les références distantes
         run_git(repo_path, "fetch", "--all", "--quiet")
 
-        # Compter commits ahead/behind
-        # git rev-list --left-right --count HEAD...@{u}
         code, out, err = run_git(repo_path, "rev-list", "--left-right", "--count", f"HEAD...{upstream}")
         ahead_local = ahead_remote = 0
         if code == 0 and out:
             parts = out.split()
             if len(parts) >= 2:
-                # Format: "<only_HEAD> <only_upstream>"
                 try:
                     ahead_local = int(parts[0])
                     ahead_remote = int(parts[1])
                 except ValueError:
                     pass
 
-        # Lignes modifiées (insertions + deletions)
-        # git diff --shortstat HEAD...@{u}
         code, out, err = run_git(repo_path, "diff", "--shortstat", f"HEAD...{upstream}")
         lines_changed = 0
         if code == 0 and out:
             nums = [int(x) for x in re.findall(r"(\d+)", out)]
             if len(nums) >= 3:
-                # ex: "1 file changed, 3 insertions(+), 1 deletion(-)"
                 lines_changed = nums[-2] + nums[-1]
             elif nums:
                 lines_changed = nums[-1]
 
+        git(
+            f"[{repo_path.name}] ahead_local={ahead_local}, "
+            f"ahead_remote={ahead_remote}, lines_changed={lines_changed}"
+        )
         return ahead_local, ahead_remote, lines_changed
 
     # ------------------------------------------------------------------
     # Git : clone / push
     # ------------------------------------------------------------------
     def clone_repo(self, repo_name: str) -> int:
-        """
-        Clone un dépôt GitHub dans base_path.
-        Utilise l'URL SSH (git@github.com:user/repo.git).
-        """
+        """Clone un dépôt GitHub dans base_path (URL SSH)."""
         url = f"git@github.com:{self.github_user}/{repo_name}.git"
         target = self.base_path / repo_name
         if target.exists():
-            return 0  # déjà présent
+            info(f"clone_repo: {repo_name} déjà présent localement.")
+            return 0
+
+        info(f"clone_repo: {repo_name} -> {target}")
         code, out, err = run_cmd(self.base_path, "git", "clone", url, str(target))
+        git(f"[clone {repo_name}] rc={code}\nstdout:\n{out}\nstderr:\n{err}")
         if code != 0:
-            print(f"❌ Échec du clone de {repo_name} : {err}")
+            error(f"Échec du clone de {repo_name} : {err}")
+        else:
+            info(f"clone_repo OK: {repo_name}")
         return code
 
     def push_repo(self, repo_path: Path) -> int:
-        """
-        Fait un git push du dépôt vers son 'origin'.
-        """
-        # On essaie de détecter la branche courante
+        """Fait un git push du dépôt vers son 'origin'."""
         code, out, err = run_git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
         if code != 0:
-            print(f"❌ Impossible de déterminer la branche pour {repo_path}: {err}")
+            error(f"Impossible de déterminer la branche pour {repo_path}: {err}")
             return code
+
         branch = out.strip()
+        info(f"push_repo: {repo_path.name} sur branche {branch}")
         code, out, err = run_git(repo_path, "push", "origin", branch)
+        git(f"[push {repo_path.name}] rc={code}\nstdout:\n{out}\nstderr:\n{err}")
         if code != 0:
-            print(f"❌ Échec du push de {repo_path.name}: {err}")
+            error(f"Échec du push de {repo_path.name}: {err}")
+        else:
+            info(f"push_repo OK: {repo_path.name}")
         return code

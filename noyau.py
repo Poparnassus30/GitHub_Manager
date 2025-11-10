@@ -1,8 +1,9 @@
 # noyau.py
 from __future__ import annotations
-from logger import log
+
 import threading
 import time
+import traceback
 from queue import Queue, Empty
 
 from config import Config
@@ -10,20 +11,30 @@ from state import Registre
 from github_service import GithubService
 from rich_graph import RichGraph
 from rich.live import Live
+from rich.prompt import Prompt
+from logger import log, info, error
+from mythread import MyThread
 
 
 class Noyau:
     """Cerveau principal : gère threads, GitHub, UI et synchronisation."""
 
-    def __init__(self) -> None:
-        self.cfg = Config()
-        self.state = Registre()
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.state = Registre(logger_func=log)
         self.github = GithubService(self.cfg, self.state)
         self.ui = RichGraph()
 
         self.commands: Queue[tuple[str, str | None]] = Queue()
         self.shutdown_event = threading.Event()
-        self._threads: list[threading.Thread] = []
+
+        # Threads de fond (kbd, refresh, etc.)
+        self._threads: dict[str, MyThread] = {}
+
+        log(
+            f"Noyau initialisé : base_path={self.cfg.base_path}, "
+            f"github_user={self.cfg.github_user}"
+        )
 
     # ------------------------------------------------------------------
     # Lancement général
@@ -32,108 +43,182 @@ class Noyau:
         self._start_background_threads()
         self._ui_loop()
 
+    def stop(self) -> None:
+        """Arrêt global du noyau."""
+        self.shutdown_event.set()
+        # On demande aussi l'arrêt explicite des threads MyThread
+        for t in list(self._threads.values()):
+            t.stop()
+        log("Arrêt propre du noyau et des threads terminé.")
+        
     def _start_background_threads(self) -> None:
+        """Lance les threads de fond (clavier + refresh GitHub)."""
+
         # Thread clavier
-        t_kb = threading.Thread(target=self._keyboard_loop, name="kbd", daemon=True)
-        self._threads.append(t_kb)
+        t_kb = MyThread(
+            name="kbd",
+            target=self._keyboard_loop,
+            registre=self.state,
+            logger=log,
+        )
+        self._threads["kbd"] = t_kb
 
         # Thread de refresh GitHub
-        t_refresh = threading.Thread(target=self._refresh_loop, name="refresh", daemon=True)
-        self._threads.append(t_refresh)
+        t_refresh = MyThread(
+            name="refresh",
+            target=self._refresh_loop,
+            registre=self.state,
+            logger=log,
+        )
+        self._threads["refresh"] = t_refresh
 
-        for t in self._threads:
+        for t in self._threads.values():
             t.start()
-
-    def stop(self) -> None:
-        self.shutdown_event.set()
 
     # ------------------------------------------------------------------
     # Threads de fond
     # ------------------------------------------------------------------
-    def _keyboard_loop(self) -> None:
-        """Écoute clavier (non bloquante)."""
-        import msvcrt
-        while not self.shutdown_event.is_set():
+    def _keyboard_loop(self, thread: MyThread) -> None:
+        """Écoute clavier (non bloquante, Windows uniquement)."""
+        try:
+            import msvcrt  # dispo que sous Windows
+        except ImportError:
+            log("Clavier: msvcrt indisponible sur cette plateforme, écoute désactivée.")
+            return
+
+        while not self.shutdown_event.is_set() and not thread.stopped():
             if msvcrt.kbhit():
                 ch = msvcrt.getch().lower()
                 if ch == b"q":
+                    log("Clavier: Q (quit)")
                     self.commands.put(("quit", None))
                 elif ch == b"1":
+                    log("Clavier: 1 (refresh)")
                     self.commands.put(("refresh", None))
                 elif ch == b"2":
+                    log("Clavier: 2 (import)")
                     self.commands.put(("import", None))
                 elif ch == b"3":
+                    log("Clavier: 3 (export)")
                     self.commands.put(("export", None))
             time.sleep(0.05)
 
-    def _refresh_loop(self) -> None:
-        ...
-        from pathlib import Path
-
-        base_dir = Path(__file__).resolve().parent
-        log_file = base_dir / "error_threads.log"
-
-        while not self.shutdown_event.is_set():
+    def _refresh_loop(self, thread: MyThread) -> None:
+        """Thread de refresh périodique GitHub + reload config."""
+        while not self.shutdown_event.is_set() and not thread.stopped():
             try:
                 if self.cfg.poll_changes():
                     self.github.on_config_changed(self.cfg)
 
                 self.github.refresh_repos()
-                # log "normal" pour voir que ça tourne
-                log("Refresh GitHub OK")
+                info("refresh_loop: Refresh GitHub OK")
+
+                # Si jamais on avait des threads non-MyThread dans le registre :
+                self.state.cleanup_dead_threads()
 
             except Exception as e:
-                msg = f"EXCEPTION refresh_loop: {e}"
-                import traceback
                 tb = traceback.format_exc()
-
-                # log détaillé dans app.log
-                log(msg)
-                log(tb)
-
-                # en plus: fichier d'erreur "brut"
-                with log_file.open("a", encoding="utf-8") as f:
-                    f.write(msg + "\n")
-                    f.write(tb + "\n" + "=" * 80 + "\n")
+                error(f"EXCEPTION refresh_loop: {e}\n{tb}")
 
             time.sleep(self.cfg.refresh_rate)
 
-
-
     # ------------------------------------------------------------------
-    # Jobs spécifiques (import/export)
+    # Saisie utilisateur (nom de dépôt)
     # ------------------------------------------------------------------
-    def _launch_import_job(self) -> None:
-        t = threading.Thread(target=self.github.import_missing_repos, name="import_job", daemon=True)
-        t.start()
-
-    def _launch_export_job(self) -> None:
-        t = threading.Thread(target=self.github.export_local_repos, name="export_job", daemon=True)
-        t.start()
+    def _ask_repo_name(self, live: Live) -> str | None:
+        """
+        Stoppe l'affichage Live, demande le nom du dépôt
+        (Entrée vide = tous les dépôts), puis relance l'affichage.
+        """
+        live.stop()
+        try:
+            name = Prompt.ask("Nom du dépôt à traiter ([Entrée] = tous)")
+            name = name.strip()
+            return name or None
+        finally:
+            live.start()
 
     # ------------------------------------------------------------------
     # Boucle principale UI
     # ------------------------------------------------------------------
     def _ui_loop(self) -> None:
-        """Affiche l'état en temps réel avec Rich."""
-        with Live(self.ui.render(self.state.snapshot()), refresh_per_second=4, screen=True) as live:
+        """Affiche l'état en temps réel avec Rich et gère les commandes."""
+        with Live(
+            self.ui.render(self.state.snapshot()),
+            refresh_per_second=4,
+            screen=True,
+        ) as live:
             while not self.shutdown_event.is_set():
+                # Lecture non bloquante des commandes
                 try:
                     cmd, arg = self.commands.get_nowait()
                 except Empty:
                     cmd = None
+                    arg = None
 
+                if cmd is not None:
+                    log(f"UI: commande reçue {cmd!r} arg={arg!r}")
+
+                # -------------------
+                # Gestion des commandes
+                # -------------------
                 if cmd == "quit":
                     self.stop()
                     break
+
                 elif cmd == "refresh":
                     self.github.refresh_repos()
-                elif cmd == "import":
-                    self._launch_import_job()
-                elif cmd == "export":
-                    self._launch_export_job()
 
-                # Met à jour l'affichage
+                elif cmd == "import":
+                    target = self._ask_repo_name(live)
+
+                    def import_worker(thread: MyThread, repo_target: str | None):
+                        try:
+                            self.github.import_missing_repos(repo_target)
+                        except Exception as e:
+                            tb = traceback.format_exc()
+                            error(f"EXCEPTION import_job: {e}\n{tb}")
+                        else:
+                            log("import_job terminé avec succès.")
+
+                        # Rien de spécial à faire ici pour le registre :
+                        # MyThread s'en occupe via add_thread/remove_thread.
+
+                    job_name = f"import_job_{target or 'all'}"
+                    t = MyThread(
+                        name=job_name,
+                        target=import_worker,
+                        registre=self.state,
+                        logger=log,
+                        args=(target,),
+                    )
+                    t.start()
+
+                elif cmd == "export":
+                    target = self._ask_repo_name(live)
+
+                    def export_worker(thread: MyThread, repo_target: str | None):
+                        try:
+                            self.github.export_local_repos(repo_target)
+                        except Exception as e:
+                            tb = traceback.format_exc()
+                            error(f"EXCEPTION export_job: {e}\n{tb}")
+                        else:
+                            log("export_job terminé avec succès.")
+
+                    job_name = f"export_job_{target or 'all'}"
+                    t = MyThread(
+                        name=job_name,
+                        target=export_worker,
+                        registre=self.state,
+                        logger=log,
+                        args=(target,),
+                    )
+                    t.start()
+
+                # -------------------
+                # MAJ de l'affichage
+                # -------------------
                 snapshot = self.state.snapshot()
                 live.update(self.ui.render(snapshot))
                 time.sleep(0.2)
