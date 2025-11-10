@@ -12,7 +12,7 @@ from github_service import GithubService
 from rich_graph import RichGraph
 from rich.live import Live
 from rich.prompt import Prompt
-from logger import log, info, error
+from logger import log, info, error, set_verbose
 from mythread import MyThread
 
 
@@ -40,20 +40,24 @@ class Noyau:
     # Lancement général
     # ------------------------------------------------------------------
     def start(self) -> None:
+        log("Noyau.start() : démarrage des threads de fond et de l'UI.")
         self._start_background_threads()
         self._ui_loop()
+        log("Noyau.start() : boucle UI terminée.")
 
     def stop(self) -> None:
         """Arrêt global du noyau."""
+        log("Noyau.stop() : arrêt demandé.")
         self.shutdown_event.set()
         # On demande aussi l'arrêt explicite des threads MyThread
         for t in list(self._threads.values()):
             t.stop()
-        log("Arrêt propre du noyau et des threads terminé.")
-        
+        log(f"Noyau.stop() : threads de fond stoppés. Threads restants dans le registre : {self.state.list_threads()}")
+
     def _start_background_threads(self) -> None:
         """Lance les threads de fond (clavier + refresh GitHub)."""
 
+        log("Lancement des threads de fond (kbd, refresh).")
         # Thread clavier
         t_kb = MyThread(
             name="kbd",
@@ -74,7 +78,7 @@ class Noyau:
 
         for t in self._threads.values():
             t.start()
-
+        log("Threads de fond démarrés.")
     # ------------------------------------------------------------------
     # Threads de fond
     # ------------------------------------------------------------------
@@ -106,8 +110,11 @@ class Noyau:
     def _refresh_loop(self, thread: MyThread) -> None:
         """Thread de refresh périodique GitHub + reload config."""
         while not self.shutdown_event.is_set() and not thread.stopped():
+            log("refresh_loop: tick de rafraîchissement.")
             try:
                 if self.cfg.poll_changes():
+                    set_verbose(self.cfg.visual_log)
+                    log(f"Config rechargée : visual_log={self.cfg.visual_log}")
                     self.github.on_config_changed(self.cfg)
 
                 self.github.refresh_repos()
@@ -174,7 +181,9 @@ class Noyau:
 
                     def import_worker(thread: MyThread, repo_target: str | None):
                         try:
+                            log(f"import_worker: début (target={repo_target})")
                             self.github.import_missing_repos(repo_target)
+                            log(f"import_worker: fin (target={repo_target})")
                         except Exception as e:
                             tb = traceback.format_exc()
                             error(f"EXCEPTION import_job: {e}\n{tb}")
@@ -185,6 +194,7 @@ class Noyau:
                         # MyThread s'en occupe via add_thread/remove_thread.
 
                     job_name = f"import_job_{target or 'all'}"
+                    log(f"Lancement job d'import : {job_name}")
                     t = MyThread(
                         name=job_name,
                         target=import_worker,
@@ -207,6 +217,7 @@ class Noyau:
                             log("export_job terminé avec succès.")
 
                     job_name = f"export_job_{target or 'all'}"
+                    log(f"Lancement job d'export : {job_name}")
                     t = MyThread(
                         name=job_name,
                         target=export_worker,
