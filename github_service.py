@@ -92,6 +92,7 @@ class GithubService:
             ahead_local = ahead_remote = lines_changed = 0
 
             if has_git and remote_exists:
+                self.client._ensure_https_remote(local_git[name])  # conversion auto si besoin
                 ahead_local, ahead_remote, lines_changed = self.client.get_ahead_behind_and_lines(
                     local_git[name]
                 )

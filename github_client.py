@@ -149,17 +149,17 @@ class GithubClient:
         return ahead_local, ahead_remote, lines_changed
 
     # ------------------------------------------------------------------
-    # Git : clone / push
+    # Git : clone / push HTTPS
     # ------------------------------------------------------------------
     def clone_repo(self, repo_name: str) -> int:
-        """Clone un dépôt GitHub dans base_path (URL SSH)."""
-        url = f"git@github.com:{self.github_user}/{repo_name}.git"
+        """Clone un dépôt GitHub dans base_path (URL HTTPS)."""
+        url = f"https://github.com/{self.github_user}/{repo_name}.git"
         target = self.base_path / repo_name
         if target.exists():
             info(f"clone_repo: {repo_name} déjà présent localement.")
             return 0
 
-        info(f"clone_repo: {repo_name} -> {target}")
+        info(f"clone_repo: {repo_name} -> {target} (URL={url})")
         code, out, err = run_cmd(self.base_path, "git", "clone", url, str(target))
         git(f"[clone {repo_name}] rc={code}\nstdout:\n{out}\nstderr:\n{err}")
         if code != 0:
@@ -167,9 +167,30 @@ class GithubClient:
         else:
             info(f"clone_repo OK: {repo_name}")
         return code
+    
+    def _ensure_https_remote(self, repo_path: Path) -> None:
+        """
+        Si origin est en SSH (git@github.com:...), convertit en HTTPS.
+        Ne fait rien si déjà en HTTPS ou si origin n'existe pas.
+        """
+        code, out, err = run_git(repo_path, "remote")
+        if code != 0 or "origin" not in out.split():
+            return
+
+        code, url, err = run_git(repo_path, "remote", "get-url", "origin")
+        if code != 0:
+            return
+
+        url = url.strip()
+        if url.startswith("git@github.com:"):
+            # git@github.com:User/Repo.git  ->  https://github.com/User/Repo.git
+            https_url = "https://github.com/" + url.split("git@github.com:")[1]
+            info(f"Migrate remote to HTTPS: {repo_path.name} -> {https_url}")
+            run_git(repo_path, "remote", "set-url", "origin", https_url)
 
     def push_repo(self, repo_path: Path) -> int:
         """Fait un git push du dépôt vers son 'origin'."""
+        self._ensure_https_remote(repo_path)
         code, out, err = run_git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
         if code != 0:
             error(f"Impossible de déterminer la branche pour {repo_path}: {err}")

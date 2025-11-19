@@ -5,14 +5,16 @@ import threading
 import time
 import traceback
 from queue import Queue, Empty
-
+from pathlib import Path
+import os
+import subprocess
 from config import Config
 from state import Registre
 from github_service import GithubService
 from rich_graph import RichGraph
 from rich.live import Live
 from rich.prompt import Prompt
-from logger import log, info, error, set_verbose
+from logger import warning, log, info, error, set_verbose
 from mythread import MyThread
 
 
@@ -105,6 +107,8 @@ class Noyau:
                 elif ch == b"3":
                     log("Clavier: 3 (export)")
                     self.commands.put(("export", None))
+
+
             time.sleep(0.05)
 
     def _refresh_loop(self, thread: MyThread) -> None:
@@ -144,8 +148,7 @@ class Noyau:
             return name or None
         finally:
             live.start()
-
-    # ------------------------------------------------------------------
+    # -----------------------------------------
     # Boucle principale UI
     # ------------------------------------------------------------------
     def _ui_loop(self) -> None:

@@ -21,9 +21,7 @@ class Config:
             "github_user": "Poparnassus30",
             "refresh_rate": "70",   # secondes entre deux refresh auto
         },
-        "auth": {
-            "key_path": str(Path.home() / ".ssh" / "id_ed25519"),
-        },
+        
         "debug": {
             "visual_log": True
         },
